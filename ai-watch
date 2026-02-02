@@ -1,0 +1,796 @@
+#!/usr/bin/env python3
+"""AI Coding Assistant Dashboard - Claude, Codex, OpenCode"""
+import os
+import sys
+import json
+import subprocess
+import re
+import time
+import unicodedata
+from pathlib import Path
+
+
+# ============== Visual Width Calculation ==============
+
+def visual_width(s):
+    """Calculate visual width of string (handles CJK, emoji, ANSI codes)"""
+    # Remove ANSI escape codes
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    clean = ansi_escape.sub('', s)
+
+    width = 0
+    for char in clean:
+        # East Asian Width
+        ea_width = unicodedata.east_asian_width(char)
+        if ea_width in ('F', 'W'):  # Fullwidth, Wide (CJK, emoji)
+            width += 2
+        elif ea_width == 'A':  # Ambiguous - treat as 1
+            width += 1
+        else:
+            width += 1
+    return width
+
+
+def pad_to_width(s, target_width):
+    """Pad string with spaces to reach target visual width"""
+    current = visual_width(s)
+    if current >= target_width:
+        return s
+    return s + ' ' * (target_width - current)
+
+
+def truncate_to_width(s, max_width):
+    """Truncate string to fit within max visual width"""
+    width = 0
+    result = []
+    for char in s:
+        ea_width = unicodedata.east_asian_width(char)
+        char_width = 2 if ea_width in ('F', 'W') else 1
+        if width + char_width > max_width:
+            break
+        result.append(char)
+        width += char_width
+    return ''.join(result)
+
+
+# ============== Tool Detection ==============
+
+def get_process_cwds(process_pattern):
+    """Get cwds for processes matching pattern"""
+    cwds = {}
+    try:
+        ps_result = subprocess.run(["ps", "-eo", "pid,%cpu,command"], capture_output=True, text=True)
+        for line in ps_result.stdout.split('\n'):
+            if re.search(process_pattern, line):
+                parts = line.split()
+                if len(parts) >= 2:
+                    pid = parts[0]
+                    cpu = float(parts[1]) if len(parts) > 1 else 0
+                    lsof_result = subprocess.run(
+                        ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                        capture_output=True, text=True
+                    )
+                    for lsof_line in lsof_result.stdout.split('\n'):
+                        if lsof_line.startswith('n/'):
+                            cwd = lsof_line[1:]
+                            cwds[cwd] = max(cwds.get(cwd, 0), cpu)
+                            break
+    except Exception:
+        pass
+    return cwds
+
+
+def get_all_ai_sessions():
+    """Get all active AI coding sessions (Claude, Codex, OpenCode)"""
+    sessions = []
+
+    # Claude sessions
+    claude_cwds = get_process_cwds(r'\bclaude(\s+--\S+)*\s*$')
+    claude_dir = Path.home() / ".claude" / "projects"
+    for cwd, cpu in claude_cwds.items():
+        session_files = find_claude_sessions(cwd, claude_dir)
+        for sf in session_files:
+            sessions.append({
+                'tool': 'Claude',
+                'cwd': cwd,
+                'session_file': sf,
+                'cpu': cpu
+            })
+
+    # Codex sessions
+    codex_cwds = get_process_cwds(r'\bcodex\b')
+    for cwd, cpu in codex_cwds.items():
+        session_info = get_codex_session_info(cwd)
+        if session_info:
+            sessions.append({
+                'tool': 'Codex',
+                'cwd': cwd,
+                'file': session_info.get('file'),  # For get_codex_messages
+                'session_file': session_info.get('file'),  # For sorting
+                'is_history': session_info.get('is_history', False),
+                'cpu': cpu
+            })
+
+    # OpenCode sessions - show each process with project/branch only (no messages)
+    opencode_cwds = get_process_cwds(r'\bopencode\b')
+    for cwd, cpu in opencode_cwds.items():
+        sessions.append({
+            'tool': 'OpenCode',
+            'cwd': cwd,
+            'session_file': None,  # No session matching possible
+            'title': None,
+            'cpu': cpu,
+            'no_messages': True  # Flag to skip message display
+        })
+
+    return sessions
+
+
+# ============== Claude ==============
+
+def find_claude_sessions(cwd, claude_dir):
+    """Find all recent session files for a Claude working directory"""
+    session_files = []
+    safe_path = cwd.replace("/", "-")
+    session_dir = claude_dir / safe_path
+
+    if session_dir.exists():
+        jsonl_files = list(session_dir.glob("*.jsonl"))
+        now = time.time()
+        for f in jsonl_files:
+            if (now - f.stat().st_mtime) < 7200:  # 2 hours
+                session_files.append(f)
+
+    # Fuzzy match for non-ASCII paths
+    if not session_files and claude_dir.exists():
+        ascii_pattern = ''.join(c if c.isascii() else '.*' for c in cwd.replace('/', '-'))
+        for folder in claude_dir.iterdir():
+            if not folder.is_dir():
+                continue
+            if re.match(f'^{ascii_pattern}$', folder.name):
+                jsonl_files = list(folder.glob("*.jsonl"))
+                now = time.time()
+                for f in jsonl_files:
+                    if (now - f.stat().st_mtime) < 7200:
+                        session_files.append(f)
+
+    return session_files
+
+
+def get_claude_status(session_file, cpu=0):
+    """Get Claude session status"""
+    try:
+        mtime = session_file.stat().st_mtime
+        seconds_since_update = time.time() - mtime
+
+        with open(session_file, 'r') as f:
+            lines = f.readlines()
+            last_user_idx = -1
+            last_assistant_idx = -1
+
+            for i, line in enumerate(lines[-100:]):
+                try:
+                    data = json.loads(line)
+                    msg_type = data.get('type', '')
+                    if msg_type == 'user':
+                        last_user_idx = i
+                    elif msg_type == 'assistant':
+                        last_assistant_idx = i
+                except:
+                    continue
+
+            # 마지막 메시지가 user면 -> Claude가 응답해야 함
+            if last_user_idx > last_assistant_idx:
+                # CPU 5% 이상이고 최근 30초 이내 업데이트 -> 진행중
+                if cpu > 5.0 and seconds_since_update < 30:
+                    return ("🔵", "진행중", 3)
+                else:
+                    return ("🟡", "답변 대기", 4)
+            # 마지막 메시지가 assistant면 -> 사용자 입력 대기
+            elif last_assistant_idx >= 0:
+                # CPU 5% 이상이고 최근 3초 이내 업데이트 -> 아직 진행중
+                if cpu > 5.0 and seconds_since_update < 3:
+                    return ("🔵", "진행중", 3)
+                else:
+                    return ("🟢", "작업 완료", 2)
+    except:
+        pass
+    return ("⚪", "-", 0)
+
+
+def get_claude_messages(session_file, count=2):
+    """Get last N messages from Claude session"""
+    messages = []
+    try:
+        with open(session_file, 'r') as f:
+            lines = f.readlines()
+            for line in reversed(lines[-100:]):
+                try:
+                    data = json.loads(line)
+                    msg_type = data.get('type', '')
+                    if msg_type == 'user':
+                        content = data.get('message', {}).get('content', '')
+                        if isinstance(content, str) and content.strip():
+                            clean = content.replace('\n', ' ')[:200]  # Keep more, truncate later
+                            messages.append(("U", clean))
+                    elif msg_type == 'assistant':
+                        content = data.get('message', {}).get('content', [])
+                        if isinstance(content, list) and content:
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'text':
+                                    text = item.get('text', '').replace('\n', ' ')[:200]  # Keep more
+                                    if text:
+                                        messages.append(("A", text))
+                                        break
+                    if len(messages) >= count:
+                        break
+                except:
+                    continue
+    except:
+        pass
+    return list(reversed(messages))
+
+
+# ============== Codex ==============
+
+def find_codex_session_for_cwd(cwd):
+    """Find Codex session file that matches the given cwd"""
+    sessions_dir = Path.home() / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    try:
+        # Find all session files, sorted by modification time (newest first)
+        session_files = list(sessions_dir.rglob("*.jsonl"))
+        session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+        for sf in session_files[:20]:  # Check recent 20 sessions
+            try:
+                with open(sf, 'r') as f:
+                    first_line = f.readline()
+                    if first_line:
+                        data = json.loads(first_line)
+                        if data.get('type') == 'session_meta':
+                            session_cwd = data.get('payload', {}).get('cwd', '')
+                            if session_cwd == cwd:
+                                return sf
+            except:
+                continue
+    except:
+        pass
+    return None
+
+
+def get_codex_session_info(cwd):
+    """Get Codex session info for specific cwd"""
+    session_file = find_codex_session_for_cwd(cwd)
+
+    if session_file:
+        return {
+            'file': session_file,
+            'cwd': cwd
+        }
+
+    # Fallback to history.jsonl
+    history_file = Path.home() / ".codex" / "history.jsonl"
+    if history_file.exists():
+        return {
+            'file': history_file,
+            'cwd': cwd,
+            'is_history': True
+        }
+    return None
+
+
+def get_codex_messages(session_info, count=2):
+    """Get last N messages from Codex session"""
+    messages = []
+    if not session_info or not session_info.get('file'):
+        return messages
+
+    session_file = session_info['file']
+    is_history = session_info.get('is_history', False)
+
+    try:
+        with open(session_file, 'r') as f:
+            lines = f.readlines()
+
+        # Parse messages from session file
+        for line in reversed(lines[-100:]):
+            try:
+                data = json.loads(line)
+
+                if is_history:
+                    # history.jsonl format
+                    text = data.get('text', '')
+                    if text:
+                        messages.append(("U", text.replace('\n', ' ')[:200]))
+                else:
+                    # Session file format
+                    msg_type = data.get('type', '')
+                    if msg_type == 'response_item':
+                        payload = data.get('payload', {})
+                        role = payload.get('role', '')
+                        content = payload.get('content', [])
+
+                        for item in content:
+                            if isinstance(item, dict):
+                                text = item.get('text', '') or item.get('input_text', '')
+                                if text and len(text) > 5:  # Skip short system messages
+                                    emoji = "U" if role == "user" else "A"
+                                    messages.append((emoji, text.replace('\n', ' ')[:200]))
+                                    break
+
+                if len(messages) >= count:
+                    break
+            except:
+                continue
+    except:
+        pass
+
+    return list(reversed(messages))
+
+
+def get_codex_status(session_info, cpu=0):
+    """Get Codex session status"""
+    if cpu > 5.0:
+        return ("🔵", "진행중", 3)
+
+    if session_info and session_info.get('file'):
+        try:
+            mtime = session_info['file'].stat().st_mtime
+            seconds_since_update = time.time() - mtime
+            if seconds_since_update < 10:
+                return ("🔵", "진행중", 3)
+            elif seconds_since_update < 60:
+                return ("🟡", "답변 대기", 4)
+        except:
+            pass
+
+    return ("🟢", "작업 완료", 2)
+
+
+# ============== OpenCode ==============
+
+def get_opencode_session_info(cwd, storage_dir):
+    """Get OpenCode session info"""
+    session_dir = storage_dir / "session" / "global"
+    if not session_dir.exists():
+        return None
+
+    try:
+        # Find most recent session file
+        session_files = list(session_dir.glob("*.json"))
+        if not session_files:
+            return None
+
+        latest = max(session_files, key=lambda f: f.stat().st_mtime)
+        with open(latest, 'r') as f:
+            data = json.load(f)
+            return {
+                'file': latest,
+                'title': data.get('title', ''),
+                'directory': data.get('directory', ''),
+                'time': data.get('time', {})
+            }
+    except:
+        pass
+    return None
+
+
+def get_opencode_active_session(storage_dir):
+    """Get the most recently active OpenCode session based on message activity"""
+    session_dir = storage_dir / "session" / "global"
+    message_dir = storage_dir / "message"
+
+    if not session_dir.exists():
+        return None
+
+    try:
+        session_files = list(session_dir.glob("*.json"))
+        if not session_files:
+            return None
+
+        # Find session with most recent message activity
+        best_session = None
+        best_mtime = 0
+
+        for sf in session_files:
+            session_id = sf.stem
+            msg_dir = message_dir / session_id
+
+            if msg_dir.exists():
+                msg_files = list(msg_dir.glob("*.json"))
+                if msg_files:
+                    latest_msg_time = max(f.stat().st_mtime for f in msg_files)
+                    if latest_msg_time > best_mtime:
+                        best_mtime = latest_msg_time
+                        best_session = sf
+
+        if best_session:
+            with open(best_session, 'r') as f:
+                data = json.load(f)
+                return {
+                    'file': best_session,
+                    'title': data.get('title', ''),
+                    'directory': data.get('directory', ''),
+                    'time': data.get('time', {})
+                }
+
+        # Fallback to most recent session file
+        latest = max(session_files, key=lambda f: f.stat().st_mtime)
+        with open(latest, 'r') as f:
+            data = json.load(f)
+            return {
+                'file': latest,
+                'title': data.get('title', ''),
+                'directory': data.get('directory', ''),
+                'time': data.get('time', {})
+            }
+    except:
+        pass
+    return None
+
+
+def get_opencode_status(session_info, cpu=0):
+    """Get OpenCode session status"""
+    if cpu > 5.0:
+        return ("🔵", "진행중", 3)
+
+    if session_info and session_info.get('file'):
+        try:
+            mtime = session_info['file'].stat().st_mtime
+            seconds_since_update = time.time() - mtime
+            if seconds_since_update < 10:
+                return ("🔵", "진행중", 3)
+            elif seconds_since_update < 60:
+                return ("🟡", "답변 대기", 4)
+        except:
+            pass
+
+    return ("🟢", "작업 완료", 2)
+
+
+def get_opencode_messages(session, storage_dir, count=2):
+    """Get last N messages from OpenCode session"""
+    messages = []
+
+    # Support both 'file' and 'session_file' keys
+    session_file = session.get('file') or session.get('session_file')
+    if not session_file:
+        return messages
+
+    try:
+        # Get session ID from filename
+        session_id = session_file.stem  # e.g., ses_3eb4bf433ffexTFDne9jodLF0S
+
+        # Find message files for this session
+        message_dir = storage_dir / "message" / session_id
+        if not message_dir.exists():
+            return messages
+
+        # Get recent message files sorted by time
+        msg_files = list(message_dir.glob("*.json"))
+        if not msg_files:
+            return messages
+
+        # Sort by modification time (most recent first)
+        msg_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+        part_dir = storage_dir / "part"
+
+        for msg_file in msg_files[:count * 2]:  # Check more files to find text content
+            try:
+                with open(msg_file, 'r') as f:
+                    msg_data = json.load(f)
+
+                role = msg_data.get('role', '')
+                msg_id = msg_data.get('id', '')
+
+                # Find text content in part directory
+                msg_part_dir = part_dir / msg_id
+                if msg_part_dir.exists():
+                    part_files = list(msg_part_dir.glob("*.json"))
+                    for part_file in part_files:
+                        try:
+                            with open(part_file, 'r') as pf:
+                                part_data = json.load(pf)
+                            if part_data.get('type') == 'text':
+                                text = part_data.get('text', '').replace('\n', ' ')[:200]
+                                if text:
+                                    emoji = "U" if role == "user" else "A"
+                                    messages.append((emoji, text))
+                                    break
+                        except:
+                            continue
+
+                if len(messages) >= count:
+                    break
+            except:
+                continue
+
+    except:
+        pass
+
+    return list(reversed(messages))
+
+
+# ============== Git ==============
+
+def get_branch(cwd):
+    """Get git branch for directory"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True
+        )
+        return result.stdout.strip() if result.returncode == 0 else "-"
+    except:
+        return "-"
+
+
+# ============== Dashboard UI ==============
+
+def draw_dashboard_ansi():
+    """Draw the dashboard using cursor positioning"""
+    import select
+    import tty
+    import termios
+    import shutil
+
+    HIDE_CURSOR = "\033[?25l"
+    SHOW_CURSOR = "\033[?25h"
+    CLEAR_LINE = "\033[2K"
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    BLUE = "\033[34m"
+    GREEN = "\033[32m"
+    CYAN = "\033[36m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    ORANGE = "\033[38;5;208m"  # 256-color orange
+
+    # Tool colors
+    TOOL_COLORS = {
+        'Claude': ORANGE,
+        'Codex': MAGENTA,
+        'OpenCode': CYAN
+    }
+
+    def get_terminal_size():
+        try:
+            return shutil.get_terminal_size()
+        except:
+            return (80, 24)
+
+    def move_cursor(row, col=1):
+        return f"\033[{row};{col}H"
+
+    def render_lines():
+        width, height = get_terminal_size()
+        lines = []
+
+        sessions = get_all_ai_sessions()
+
+        # Sort by most recent activity (newest first)
+        def get_mtime(s):
+            tool = s.get('tool', '')
+
+            # OpenCode: use CPU as proxy for activity (higher CPU = more active)
+            if tool == 'OpenCode':
+                # Return current time minus inverse CPU to sort active ones first
+                cpu = s.get('cpu', 0)
+                if cpu > 1.0:
+                    return time.time()  # Currently active
+                return time.time() - 3600  # Treat as less recent
+
+            # Claude/Codex: use session_file mtime
+            sf = s.get('session_file')
+            if sf and hasattr(sf, 'stat'):
+                try:
+                    return sf.stat().st_mtime
+                except:
+                    return 0
+            return 0
+
+        sessions.sort(key=lambda s: -get_mtime(s))
+
+        # Header
+        lines.append(f"{BLUE}{BOLD}{'=' * min(width, 80)}{RESET}")
+        title = " AI Coding Assistant Dashboard "
+        padding = max(0, (min(width, 80) - len(title)) // 2)
+        lines.append(f"{BLUE}{BOLD}{' ' * padding}{title}{RESET}")
+        lines.append(f"{BLUE}{BOLD}{'=' * min(width, 80)}{RESET}")
+        lines.append("")
+
+        if not sessions:
+            lines.append("  No active AI sessions found.")
+            lines.append("  (Supports: Claude, Codex, OpenCode)")
+        else:
+            # Count by tool
+            tool_counts = {}
+            for s in sessions:
+                tool = s.get('tool', 'Unknown')
+                tool_counts[tool] = tool_counts.get(tool, 0) + 1
+
+            counts_str = ", ".join([f"{t}: {c}" for t, c in tool_counts.items()])
+            lines.append(f"  Found {len(sessions)} session(s) ({counts_str})")
+            lines.append("")
+
+            BOX_WIDTH = min(width - 4, 72)
+
+            for session in sessions:
+                tool = session.get('tool', 'Unknown')
+                cwd = session.get('cwd', '')
+                project = os.path.basename(cwd)
+                branch = get_branch(cwd)
+                cpu = session.get('cpu', 0)
+                tool_color = TOOL_COLORS.get(tool, '')
+
+                # Get status based on tool
+                if tool == 'Claude':
+                    sf = session.get('session_file')
+                    if sf:
+                        status_char, status_text, color_code = get_claude_status(sf, cpu)
+                    else:
+                        status_char, status_text, color_code = "⚪", "-", 0
+                elif tool == 'Codex':
+                    status_char, status_text, color_code = get_codex_status(session, cpu)
+                elif tool == 'OpenCode':
+                    status_char, status_text, color_code = get_opencode_status(session, cpu)
+                else:
+                    status_char, status_text, color_code = "⚪", "-", 0
+
+                status_color = {2: GREEN, 3: CYAN, 4: YELLOW}.get(color_code, "")
+                INNER_WIDTH = BOX_WIDTH  # Space inside the box (excluding │ on each side)
+                TEXT_WIDTH = INNER_WIDTH - 4  # Available width for text content
+
+                # Box top
+                lines.append(f"  {tool_color}╭{'─' * BOX_WIDTH}╮{RESET}")
+
+                # Tool badge + Project line
+                proj_truncated = truncate_to_width(project, 30)
+                header = f"[{tool[:2]}] {proj_truncated}"
+                status_part = f"{status_text} {status_char}"
+                content = f" {header}"
+                content = pad_to_width(content, INNER_WIDTH - visual_width(status_part) - 1)
+                lines.append(f"  {tool_color}│{RESET}{tool_color}{BOLD}{content}{RESET}{status_color}{status_part}{RESET} {tool_color}│{RESET}")
+
+                # Branch
+                branch_truncated = truncate_to_width(branch, TEXT_WIDTH - 10)
+                branch_content = f"  Branch: {branch_truncated}"
+                branch_content = pad_to_width(branch_content, INNER_WIDTH)
+                lines.append(f"  {tool_color}│{RESET}{CYAN}{branch_content}{RESET}{tool_color}│{RESET}")
+
+                # Messages
+                if tool == 'Claude' and session.get('session_file'):
+                    messages = get_claude_messages(session['session_file'])
+                    for emoji, msg in messages:
+                        prefix = "User: " if emoji == "U" else "Bot:  "
+                        msg_truncated = truncate_to_width(msg, TEXT_WIDTH - 8)
+                        msg_content = f"  {prefix}{msg_truncated}"
+                        msg_content = pad_to_width(msg_content, INNER_WIDTH)
+                        lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
+                elif tool == 'Codex':
+                    messages = get_codex_messages(session)
+                    if messages:
+                        for emoji, msg in messages:
+                            prefix = "User: " if emoji == "U" else "Bot:  "
+                            msg_truncated = truncate_to_width(msg, TEXT_WIDTH - 8)
+                            msg_content = f"  {prefix}{msg_truncated}"
+                            msg_content = pad_to_width(msg_content, INNER_WIDTH)
+                            lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
+                elif tool == 'OpenCode':
+                    # OpenCode: session-process matching not possible, skip messages
+                    pass
+
+                # Box bottom
+                lines.append(f"  {tool_color}╰{'─' * BOX_WIDTH}╯{RESET}")
+                lines.append("")
+
+        # Fill remaining space
+        while len(lines) < height - 1:
+            lines.append("")
+
+        # Footer
+        footer = " Press 'q' to quit | Claude[Cl] Codex[Co] OpenCode[Op] "
+        padding = max(0, (min(width, 80) - len(footer)) // 2)
+        lines.append(f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}")
+
+        return lines[:height]
+
+    def get_state():
+        state = {}
+        sessions = get_all_ai_sessions()
+        for s in sessions:
+            key = f"{s.get('tool')}:{s.get('cwd')}"
+            sf = s.get('session_file')
+            cpu = s.get('cpu', 0)
+
+            if s.get('tool') == 'Claude' and sf:
+                status = get_claude_status(sf, cpu)
+            elif s.get('tool') == 'Codex':
+                status = get_codex_status(s, cpu)
+            elif s.get('tool') == 'OpenCode':
+                status = get_opencode_status(s, cpu)
+            else:
+                status = ("-", "-", 0)
+            state[key] = status[1]
+        state['_count'] = len(sessions)
+        return state
+
+    old_settings = termios.tcgetattr(sys.stdin)
+    width, height = get_terminal_size()
+
+    try:
+        sys.stdout.write(HIDE_CURSOR)
+        sys.stdout.write("\n" * height)
+        sys.stdout.flush()
+        tty.setcbreak(sys.stdin.fileno())
+
+        prev_state = None
+
+        while True:
+            current_state = get_state()
+
+            if current_state != prev_state:
+                lines = render_lines()
+                output = []
+                for i, line in enumerate(lines):
+                    output.append(move_cursor(height - len(lines) + i + 1))
+                    output.append(CLEAR_LINE)
+                    output.append(line)
+                sys.stdout.write(''.join(output))
+                sys.stdout.flush()
+                prev_state = current_state.copy()
+
+            if select.select([sys.stdin], [], [], 1.0)[0]:
+                key = sys.stdin.read(1)
+                if key.lower() == 'q':
+                    break
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+def main():
+    """Run the dashboard"""
+    if len(sys.argv) > 1 and sys.argv[1] in ('-1', '--once'):
+        sessions = get_all_ai_sessions()
+        print(f"\n{'='*60}")
+        print(f"  AI Coding Assistant Dashboard")
+        print(f"{'='*60}\n")
+
+        if not sessions:
+            print("  No active sessions found.\n")
+        else:
+            print(f"  Found {len(sessions)} session(s)\n")
+            for s in sessions:
+                tool = s.get('tool', 'Unknown')
+                project = os.path.basename(s.get('cwd', ''))
+                branch = get_branch(s.get('cwd', ''))
+                cpu = s.get('cpu', 0)
+
+                if tool == 'Claude' and s.get('session_file'):
+                    _, status, _ = get_claude_status(s['session_file'], cpu)
+                elif tool == 'Codex':
+                    _, status, _ = get_codex_status(s, cpu)
+                elif tool == 'OpenCode':
+                    _, status, _ = get_opencode_status(s, cpu)
+                else:
+                    status = "-"
+
+                print(f"  [{tool[:2]}][{status}] {project}")
+                print(f"        Branch: {branch}\n")
+    else:
+        draw_dashboard_ansi()
+
+
+if __name__ == "__main__":
+    main()
