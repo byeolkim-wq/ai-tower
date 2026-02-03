@@ -1,50 +1,48 @@
 # AI Tower
 
-AI 코딩 어시스턴트 세션 모니터링 대시보드
+AI 코딩 어시스턴트 관제탑 - 터미널에서 실행 중인 AI 세션을 한눈에 모니터링
 
-Claude Code, Codex, OpenCode 세션을 실시간으로 모니터링합니다.
+## 지원 도구
+
+| AI | 상태 감지 | 대화 표시 | 브랜치 |
+|----|----------|----------|--------|
+| Claude Code | O | O | O |
+| Codex | O | O | O |
+| OpenCode | O | O (최근 세션) | O |
 
 ## 설치
 
 ```bash
-# 다운로드
-curl -o ~/bin/ai-tower https://raw.githubusercontent.com/byeolkim-wq/ai-tower/main/ai-tower
-
-# 실행 권한 부여
-chmod +x ~/bin/ai-tower
-
-# PATH에 ~/bin 추가 (없다면)
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+curl -o ~/bin/ai-tower https://raw.githubusercontent.com/byeolkim-wq/ai-tower/main/ai-tower && chmod +x ~/bin/ai-tower
 ```
+
+> `~/bin`이 PATH에 없다면:
+> ```bash
+> echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+> ```
 
 ## 사용법
 
 ```bash
-ai-tower
+ai-tower        # 실시간 대시보드
+ai-tower -1     # 한번만 출력
 ```
 
-- `q` 키로 종료
-- 1초마다 자동 업데이트
+`q` 키로 종료
 
-## 기능
+## 상태 표시
 
-- Claude Code, Codex, OpenCode 세션 감지
-- 프로젝트명, Git 브랜치 표시
-- 상태 표시: 진행중 🔵, 답변 대기 🟡, 작업 완료 🟢
-- 최근 대화 내용 표시 (Claude, Codex)
+| 상태 | 의미 |
+|------|------|
+| 진행중 🔵 | AI가 작업 중 |
+| 답변 대기 🟡 | 사용자 입력 대기 |
+| 작업 완료 🟢 | AI 응답 완료 |
 
 ## 요구사항
 
 - macOS
 - Python 3
-- terminal-notifier (알림용, 선택사항)
-
-```bash
-brew install terminal-notifier
-```
 
 ## 스크린샷
 
 <img width="600" height="1720" alt="image" src="https://github.com/user-attachments/assets/a15967b5-87b5-49cf-869e-a0a01c6a549d" />
-
