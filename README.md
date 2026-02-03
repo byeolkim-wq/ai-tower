@@ -13,6 +13,7 @@ AI 코딩 어시스턴트 관제탑 - 터미널에서 실행 중인 AI 세션을
 ## 설치
 
 ```bash
+mkdir -p ~/bin
 curl -o ~/bin/ai-tower https://raw.githubusercontent.com/byeolkim-wq/ai-tower/main/ai-tower && chmod +x ~/bin/ai-tower
 ```
 
