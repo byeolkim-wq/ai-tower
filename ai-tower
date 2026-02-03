@@ -682,8 +682,17 @@ def draw_dashboard_ansi():
                             msg_content = pad_to_width(msg_content, INNER_WIDTH)
                             lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
                 elif tool == 'OpenCode':
-                    # OpenCode: session-process matching not possible, skip messages
-                    pass
+                    # Show most recent session messages (session-process matching not possible)
+                    opencode_storage = Path.home() / ".local" / "share" / "opencode" / "storage"
+                    oc_session = get_opencode_active_session(opencode_storage)
+                    if oc_session:
+                        messages = get_opencode_messages(oc_session, opencode_storage)
+                        for emoji, msg in messages:
+                            prefix = "User: " if emoji == "U" else "Bot:  "
+                            msg_truncated = truncate_to_width(msg, TEXT_WIDTH - 8)
+                            msg_content = f"  {prefix}{msg_truncated}"
+                            msg_content = pad_to_width(msg_content, INNER_WIDTH)
+                            lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
 
                 # Box bottom
                 lines.append(f"  {tool_color}╰{'─' * BOX_WIDTH}╯{RESET}")
