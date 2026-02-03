@@ -1,4 +1,4 @@
-# AI Watch
+# AI Tower
 
 AI 코딩 어시스턴트 세션 모니터링 대시보드
 
@@ -8,10 +8,10 @@ Claude Code, Codex, OpenCode 세션을 실시간으로 모니터링합니다.
 
 ```bash
 # 다운로드
-curl -o ~/bin/ai-watch https://raw.githubusercontent.com/byeolkim-wq/ai-watch/main/ai-watch
+curl -o ~/bin/ai-tower https://raw.githubusercontent.com/byeolkim-wq/ai-tower/main/ai-tower
 
 # 실행 권한 부여
-chmod +x ~/bin/ai-watch
+chmod +x ~/bin/ai-tower
 
 # PATH에 ~/bin 추가 (없다면)
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
@@ -21,7 +21,7 @@ source ~/.zshrc
 ## 사용법
 
 ```bash
-ai-watch
+ai-tower
 ```
 
 - `q` 키로 종료
