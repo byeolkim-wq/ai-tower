@@ -57,7 +57,7 @@ def truncate_to_width(s, max_width):
 # ============== Tool Detection ==============
 
 def get_process_cwds(process_pattern):
-    """Get cwds for processes matching pattern"""
+    """Get cwds for processes matching pattern. Returns {cwd: {'cpu': max_cpu, 'count': num_processes}}"""
     cwds = {}
     try:
         ps_result = subprocess.run(["ps", "-eo", "pid,%cpu,tty,command"], capture_output=True, text=True)
@@ -81,7 +81,11 @@ def get_process_cwds(process_pattern):
                 for lsof_line in lsof_result.stdout.split('\n'):
                     if lsof_line.startswith('n/'):
                         cwd = lsof_line[1:]
-                        cwds[cwd] = max(cwds.get(cwd, 0), cpu)
+                        if cwd not in cwds:
+                            cwds[cwd] = {'cpu': cpu, 'count': 1}
+                        else:
+                            cwds[cwd]['cpu'] = max(cwds[cwd]['cpu'], cpu)
+                            cwds[cwd]['count'] += 1
                         break
     except Exception:
         pass
@@ -95,45 +99,61 @@ def get_all_ai_sessions():
     # Claude sessions
     claude_cwds = get_process_cwds(r'\bclaude(\s+--\S+)*\s*$')
     claude_dir = Path.home() / ".claude" / "projects"
-    for cwd, cpu in claude_cwds.items():
+    for cwd, info in claude_cwds.items():
+        cpu = info['cpu']
+        proc_count = info['count']
         session_files = find_claude_sessions(cwd, claude_dir)
-        for sf in session_files:
+        # Sort by most recent first
+        session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        # Only show as many sessions as running processes
+        for sf in session_files[:proc_count]:
             sessions.append({
                 'tool': 'Claude',
                 'cwd': cwd,
                 'session_file': sf,
                 'cpu': cpu
             })
+        # If no session files found but processes exist, show one without session
+        if not session_files:
+            sessions.append({
+                'tool': 'Claude',
+                'cwd': cwd,
+                'session_file': None,
+                'cpu': cpu
+            })
 
     # Codex sessions
     codex_cwds = get_process_cwds(r'\bcodex\b')
-    for cwd, cpu in codex_cwds.items():
+    for cwd, info in codex_cwds.items():
+        cpu = info['cpu']
         session_info = get_codex_session_info(cwd)
         if session_info:
             sessions.append({
                 'tool': 'Codex',
                 'cwd': cwd,
-                'file': session_info.get('file'),  # For get_codex_messages
-                'session_file': session_info.get('file'),  # For sorting
+                'file': session_info.get('file'),
+                'session_file': session_info.get('file'),
                 'is_history': session_info.get('is_history', False),
                 'cpu': cpu
             })
 
-    # OpenCode sessions - show each process with project/branch only (no messages)
+    # OpenCode sessions
     opencode_cwds = get_process_cwds(r'\bopencode\b')
-    for cwd, cpu in opencode_cwds.items():
+    for cwd, info in opencode_cwds.items():
+        cpu = info['cpu']
         sessions.append({
             'tool': 'OpenCode',
             'cwd': cwd,
-            'session_file': None,  # No session matching possible
+            'session_file': None,
             'title': None,
             'cpu': cpu,
-            'no_messages': True  # Flag to skip message display
+            'no_messages': True
         })
 
     # Gemini sessions
     gemini_cwds = get_process_cwds(r'\bgemini\b')
-    for cwd, cpu in gemini_cwds.items():
+    for cwd, info in gemini_cwds.items():
+        cpu = info['cpu']
         sessions.append({
             'tool': 'Gemini',
             'cwd': cwd,
