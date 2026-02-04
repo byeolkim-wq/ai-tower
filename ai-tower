@@ -751,7 +751,11 @@ def draw_dashboard_ansi():
                     if sf:
                         status_char, status_text, color_code = get_claude_status(sf, cpu)
                     else:
-                        status_char, status_text, color_code = "⚪", "-", 0
+                        # No session file - use CPU-based fallback
+                        if cpu > 5.0:
+                            status_char, status_text, color_code = "🔵", "진행중", 3
+                        else:
+                            status_char, status_text, color_code = "🟢", "작업 완료", 2
                 elif tool == 'Codex':
                     status_char, status_text, color_code = get_codex_status(session, cpu)
                 elif tool == 'OpenCode':
@@ -840,8 +844,13 @@ def draw_dashboard_ansi():
             sf = s.get('session_file')
             cpu = s.get('cpu', 0)
 
-            if s.get('tool') == 'Claude' and sf:
-                status = get_claude_status(sf, cpu)
+            if s.get('tool') == 'Claude':
+                if sf:
+                    status = get_claude_status(sf, cpu)
+                elif cpu > 5.0:
+                    status = ("🔵", "진행중", 3)
+                else:
+                    status = ("🟢", "작업 완료", 2)
             elif s.get('tool') == 'Codex':
                 status = get_codex_status(s, cpu)
             elif s.get('tool') == 'OpenCode':
@@ -957,8 +966,13 @@ def main():
                 branch = get_branch(s.get('cwd', ''))
                 cpu = s.get('cpu', 0)
 
-                if tool == 'Claude' and s.get('session_file'):
-                    _, status, _ = get_claude_status(s['session_file'], cpu)
+                if tool == 'Claude':
+                    if s.get('session_file'):
+                        _, status, _ = get_claude_status(s['session_file'], cpu)
+                    elif cpu > 5.0:
+                        status = "진행중"
+                    else:
+                        status = "작업 완료"
                 elif tool == 'Codex':
                     _, status, _ = get_codex_status(s, cpu)
                 elif tool == 'OpenCode':
