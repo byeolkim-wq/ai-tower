@@ -62,20 +62,23 @@ def get_process_cwds(process_pattern):
     try:
         ps_result = subprocess.run(["ps", "-eo", "pid,%cpu,command"], capture_output=True, text=True)
         for line in ps_result.stdout.split('\n'):
-            if re.search(process_pattern, line):
-                parts = line.split()
-                if len(parts) >= 2:
-                    pid = parts[0]
-                    cpu = float(parts[1]) if len(parts) > 1 else 0
-                    lsof_result = subprocess.run(
-                        ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
-                        capture_output=True, text=True
-                    )
-                    for lsof_line in lsof_result.stdout.split('\n'):
-                        if lsof_line.startswith('n/'):
-                            cwd = lsof_line[1:]
-                            cwds[cwd] = max(cwds.get(cwd, 0), cpu)
-                            break
+            parts = line.split()
+            if len(parts) >= 3:
+                # Match against basenames of command + args (handles node /path/to/gemini)
+                cmd_basenames = ' '.join(os.path.basename(p) for p in parts[2:])
+                if not re.search(process_pattern, cmd_basenames):
+                    continue
+                pid = parts[0]
+                cpu = float(parts[1]) if len(parts) > 1 else 0
+                lsof_result = subprocess.run(
+                    ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                    capture_output=True, text=True
+                )
+                for lsof_line in lsof_result.stdout.split('\n'):
+                    if lsof_line.startswith('n/'):
+                        cwd = lsof_line[1:]
+                        cwds[cwd] = max(cwds.get(cwd, 0), cpu)
+                        break
     except Exception:
         pass
     return cwds
