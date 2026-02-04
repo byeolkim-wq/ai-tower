@@ -234,7 +234,10 @@ def get_claude_status(session_file, cpu=0):
                     return ("🟢", "작업 완료", 2)
     except:
         pass
-    return ("⚪", "-", 0)
+    # Fallback: use CPU-based status instead of ⚪
+    if cpu > 5.0:
+        return ("🔵", "진행중", 3)
+    return ("🟢", "작업 완료", 2)
 
 
 def get_claude_messages(session_file, count=2):
