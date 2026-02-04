@@ -105,20 +105,19 @@ def get_all_ai_sessions():
         session_files = find_claude_sessions(cwd, claude_dir)
         # Sort by most recent first
         session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        # Only show as many sessions as running processes
-        for sf in session_files[:proc_count]:
+        # Show as many sessions as running processes
+        for i in range(proc_count):
+            if i < len(session_files):
+                sf = session_files[i]
+            elif session_files:
+                # Reuse most recent session file for message display
+                sf = session_files[0]
+            else:
+                sf = None
             sessions.append({
                 'tool': 'Claude',
                 'cwd': cwd,
                 'session_file': sf,
-                'cpu': cpu
-            })
-        # If no session files found but processes exist, show one without session
-        if not session_files:
-            sessions.append({
-                'tool': 'Claude',
-                'cwd': cwd,
-                'session_file': None,
                 'cpu': cpu
             })
 
