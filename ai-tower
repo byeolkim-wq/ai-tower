@@ -646,8 +646,8 @@ def draw_dashboard_ansi():
     def move_cursor(row, col=1):
         return f"\033[{row};{col}H"
 
-    def render_lines(scroll_offset=0):
-        width, height = get_terminal_size()
+    def render_lines():
+        width, _ = get_terminal_size()
         lines = []
 
         sessions = get_all_ai_sessions()
@@ -798,49 +798,12 @@ def draw_dashboard_ansi():
                 lines.append(f"  {tool_color}╰{'─' * BOX_WIDTH}╯{RESET}")
                 lines.append("")
 
-        # After building all content lines
-        total_lines = len(lines)
-
-        # Check if content exceeds terminal height
-        if total_lines > height - 2:  # -2 for footer + margin
-            # Calculate max scroll
-            max_scroll = max(0, total_lines - (height - 2))
-            scroll_offset = min(scroll_offset, max_scroll)
-
-            # Apply scroll: slice the content lines
-            visible_count = height - 1  # -1 for footer
-            visible_lines = lines[scroll_offset:scroll_offset + visible_count]
-
-            # Add scroll indicator at top if scrolled down
-            if scroll_offset > 0:
-                indicator = f" ↑ {scroll_offset} more "
-                if visible_lines:
-                    # Modify first line to include scroll indicator
-                    first_line = visible_lines[0]
-                    visible_lines[0] = f"{first_line}{YELLOW}{indicator}{RESET}"
-
-            # Fill remaining space if needed
-            while len(visible_lines) < height - 1:
-                visible_lines.append("")
-
-            # Footer with scroll info
-            scroll_info = f"[{scroll_offset+1}-{min(scroll_offset+visible_count, total_lines)}/{total_lines}]"
-            footer = f" ↑↓/j,k/g,G: scroll {scroll_info} | q: quit "
-            padding = max(0, (min(width, 80) - len(footer)) // 2)
-            visible_lines.append(f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}")
-
-            return visible_lines[:height]
-
-        # Original behavior when content fits
-        while len(lines) < height - 1:
-            lines.append("")
-
-        # Footer (original)
+        # Footer
         footer = " Press 'q' to quit | Claude[Cl] Codex[Co] OpenCode[Op] Gemini[Ge] "
         padding = max(0, (min(width, 80) - len(footer)) // 2)
         lines.append(f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}")
 
-        return lines[:height]
+        return lines
 
     def get_state():
         state = {}
@@ -865,75 +828,87 @@ def draw_dashboard_ansi():
         return state
 
     old_settings = termios.tcgetattr(sys.stdin)
-    width, height = get_terminal_size()
+    ENTER_ALT_SCREEN = "\033[?1049h"
+    EXIT_ALT_SCREEN = "\033[?1049l"
 
     try:
+        sys.stdout.write(ENTER_ALT_SCREEN)
         sys.stdout.write(HIDE_CURSOR)
-        sys.stdout.write("\n" * height)
         sys.stdout.flush()
         tty.setcbreak(sys.stdin.fileno())
 
-        scroll_offset = 0
         prev_state = None
+        scroll_offset = 0
         force_redraw = False
+        all_lines = []
 
         while True:
             current_state = get_state()
             width, height = get_terminal_size()
 
-            if current_state != prev_state or force_redraw:
-                lines = render_lines(scroll_offset)
+            if current_state != prev_state:
+                all_lines = render_lines()
+                force_redraw = True
+                prev_state = current_state.copy()
+
+            if force_redraw:
+                total = len(all_lines)
+                max_scroll = max(0, total - height)
+                scroll_offset = min(scroll_offset, max_scroll)
+
+                visible = all_lines[scroll_offset:scroll_offset + height]
+
+                # Replace footer with standard one
+                if total > height and len(visible) > 0:
+                    footer = " Press 'q' to quit | Claude[Cl] Codex[Co] OpenCode[Op] Gemini[Ge] "
+                    padding = max(0, (min(width, 80) - len(footer)) // 2)
+                    visible[-1] = f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}"
+
                 output = []
-                for i, line in enumerate(lines):
-                    output.append(move_cursor(height - len(lines) + i + 1))
+                for i in range(height):
+                    output.append(move_cursor(i + 1))
                     output.append(CLEAR_LINE)
-                    output.append(line)
+                    if i < len(visible):
+                        output.append(visible[i])
                 sys.stdout.write(''.join(output))
                 sys.stdout.flush()
-                prev_state = current_state.copy()
                 force_redraw = False
 
             if select.select([sys.stdin], [], [], 1.0)[0]:
                 key = sys.stdin.read(1)
                 if key.lower() == 'q':
                     break
-                elif key == 'j' or key == '\x1b':
-                    if key == '\x1b':
-                        # Handle arrow keys (escape sequences)
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            key2 = sys.stdin.read(1)
-                            if key2 == '[':
-                                if select.select([sys.stdin], [], [], 0.05)[0]:
-                                    key3 = sys.stdin.read(1)
-                                    if key3 == 'B':  # Down arrow
-                                        scroll_offset += 3
-                                        force_redraw = True
-                                    elif key3 == 'A':  # Up arrow
-                                        scroll_offset = max(0, scroll_offset - 3)
-                                        force_redraw = True
-                    else:
-                        # j key = scroll down
-                        scroll_offset += 3
-                        force_redraw = True
+                elif key == 'j':
+                    scroll_offset = min(scroll_offset + 3, max(0, len(all_lines) - height))
+                    force_redraw = True
                 elif key == 'k':
-                    # k key = scroll up
                     scroll_offset = max(0, scroll_offset - 3)
                     force_redraw = True
                 elif key == 'g':
-                    # g key = go to top
                     scroll_offset = 0
                     force_redraw = True
                 elif key == 'G':
-                    # G key = go to bottom
-                    scroll_offset = 99999  # will be clamped in render_lines
+                    scroll_offset = max(0, len(all_lines) - height)
                     force_redraw = True
+                elif key == '\x1b':
+                    if select.select([sys.stdin], [], [], 0.05)[0]:
+                        key2 = sys.stdin.read(1)
+                        if key2 == '[':
+                            if select.select([sys.stdin], [], [], 0.05)[0]:
+                                key3 = sys.stdin.read(1)
+                                if key3 == 'B':  # Down arrow
+                                    scroll_offset = min(scroll_offset + 3, max(0, len(all_lines) - height))
+                                    force_redraw = True
+                                elif key3 == 'A':  # Up arrow
+                                    scroll_offset = max(0, scroll_offset - 3)
+                                    force_redraw = True
 
     except KeyboardInterrupt:
         pass
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         sys.stdout.write(SHOW_CURSOR)
-        sys.stdout.write("\n")
+        sys.stdout.write(EXIT_ALT_SCREEN)
         sys.stdout.flush()
 
 
