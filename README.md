@@ -9,6 +9,7 @@ AI 코딩 어시스턴트 관제탑 - 터미널에서 실행 중인 AI 세션을
 | Claude Code | O | O | O |
 | Codex | O | O | O |
 | OpenCode | O | O (최근 세션) | O |
+| Gemini | O | O | O |
 
 ## 설치
 

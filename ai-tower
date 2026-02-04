@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Coding Assistant Dashboard - Claude, Codex, OpenCode"""
+"""AI Coding Assistant Dashboard - Claude, Codex, OpenCode, Gemini"""
 import os
 import sys
 import json
@@ -7,6 +7,7 @@ import subprocess
 import re
 import time
 import unicodedata
+import hashlib
 from pathlib import Path
 
 
@@ -81,7 +82,7 @@ def get_process_cwds(process_pattern):
 
 
 def get_all_ai_sessions():
-    """Get all active AI coding sessions (Claude, Codex, OpenCode)"""
+    """Get all active AI coding sessions (Claude, Codex, OpenCode, Gemini)"""
     sessions = []
 
     # Claude sessions
@@ -121,6 +122,17 @@ def get_all_ai_sessions():
             'title': None,
             'cpu': cpu,
             'no_messages': True  # Flag to skip message display
+        })
+
+    # Gemini sessions
+    gemini_cwds = get_process_cwds(r'\bgemini\b')
+    for cwd, cpu in gemini_cwds.items():
+        sessions.append({
+            'tool': 'Gemini',
+            'cwd': cwd,
+            'session_file': None,
+            'title': None,
+            'cpu': cpu
         })
 
     return sessions
@@ -515,6 +527,72 @@ def get_opencode_messages(session, storage_dir, count=2):
     return list(reversed(messages))
 
 
+# ============== Gemini ==============
+
+def get_gemini_status(session_info, cpu):
+    """Get Gemini session status"""
+    cwd = session_info.get('cwd', '')
+    gemini_dir = Path.home() / ".gemini" / "tmp"
+
+    # Find session directory by hashing cwd
+    cwd_hash = hashlib.sha256(cwd.encode()).hexdigest()
+    session_dir = gemini_dir / cwd_hash / "chats"
+
+    if not session_dir.exists():
+        return ("⚪", "-", 0)
+
+    # Find most recent session file
+    session_files = sorted(session_dir.glob("session-*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not session_files:
+        return ("⚪", "-", 0)
+
+    latest = session_files[0]
+    mtime = latest.stat().st_mtime
+    age = time.time() - mtime
+
+    if cpu > 5.0 and age < 30:
+        return ("🔵", "진행중", 3)
+    else:
+        return ("🟢", "작업 완료", 2)
+
+
+def get_gemini_messages(session_info, count=2):
+    """Get last N messages from Gemini session"""
+    cwd = session_info.get('cwd', '')
+    gemini_dir = Path.home() / ".gemini" / "tmp"
+
+    cwd_hash = hashlib.sha256(cwd.encode()).hexdigest()
+    session_dir = gemini_dir / cwd_hash / "chats"
+
+    if not session_dir.exists():
+        return []
+
+    session_files = sorted(session_dir.glob("session-*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not session_files:
+        return []
+
+    try:
+        with open(session_files[0], 'r') as f:
+            data = json.load(f)
+
+        messages = data.get('messages', [])
+        result = []
+        for msg in messages[-count:]:
+            msg_type = msg.get('type', '')
+            content = msg.get('content', '').strip()
+            if not content:
+                continue
+            # Take first line only
+            first_line = content.split('\n')[0][:200]
+            if msg_type == 'user':
+                result.append(('U', first_line))
+            elif msg_type == 'gemini':
+                result.append(('A', first_line))
+        return result[-count:]
+    except:
+        return []
+
+
 # ============== Git ==============
 
 def get_branch(cwd):
@@ -555,7 +633,8 @@ def draw_dashboard_ansi():
     TOOL_COLORS = {
         'Claude': ORANGE,
         'Codex': MAGENTA,
-        'OpenCode': CYAN
+        'OpenCode': CYAN,
+        'Gemini': GREEN
     }
 
     def get_terminal_size():
@@ -567,7 +646,7 @@ def draw_dashboard_ansi():
     def move_cursor(row, col=1):
         return f"\033[{row};{col}H"
 
-    def render_lines():
+    def render_lines(scroll_offset=0):
         width, height = get_terminal_size()
         lines = []
 
@@ -584,6 +663,17 @@ def draw_dashboard_ansi():
                 if cpu > 1.0:
                     return time.time()  # Currently active
                 return time.time() - 3600  # Treat as less recent
+
+            # Gemini: use session file mtime
+            if tool == 'Gemini':
+                cwd = s.get('cwd', '')
+                cwd_hash = hashlib.sha256(cwd.encode()).hexdigest()
+                session_dir = Path.home() / ".gemini" / "tmp" / cwd_hash / "chats"
+                if session_dir.exists():
+                    files = sorted(session_dir.glob("session-*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+                    if files:
+                        return files[0].stat().st_mtime
+                return 0
 
             # Claude/Codex: use session_file mtime
             sf = s.get('session_file')
@@ -606,7 +696,7 @@ def draw_dashboard_ansi():
 
         if not sessions:
             lines.append("  No active AI sessions found.")
-            lines.append("  (Supports: Claude, Codex, OpenCode)")
+            lines.append("  (Supports: Claude, Codex, OpenCode, Gemini)")
         else:
             # Count by tool
             tool_counts = {}
@@ -639,6 +729,8 @@ def draw_dashboard_ansi():
                     status_char, status_text, color_code = get_codex_status(session, cpu)
                 elif tool == 'OpenCode':
                     status_char, status_text, color_code = get_opencode_status(session, cpu)
+                elif tool == 'Gemini':
+                    status_char, status_text, color_code = get_gemini_status(session, cpu)
                 else:
                     status_char, status_text, color_code = "⚪", "-", 0
 
@@ -693,17 +785,58 @@ def draw_dashboard_ansi():
                             msg_content = f"  {prefix}{msg_truncated}"
                             msg_content = pad_to_width(msg_content, INNER_WIDTH)
                             lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
+                elif tool == 'Gemini':
+                    messages = get_gemini_messages(session)
+                    for emoji, msg in messages:
+                        prefix = "User: " if emoji == "U" else "Bot:  "
+                        msg_truncated = truncate_to_width(msg, TEXT_WIDTH - 8)
+                        msg_content = f"  {prefix}{msg_truncated}"
+                        msg_content = pad_to_width(msg_content, INNER_WIDTH)
+                        lines.append(f"  {tool_color}│{RESET}{msg_content}{tool_color}│{RESET}")
 
                 # Box bottom
                 lines.append(f"  {tool_color}╰{'─' * BOX_WIDTH}╯{RESET}")
                 lines.append("")
 
-        # Fill remaining space
+        # After building all content lines
+        total_lines = len(lines)
+
+        # Check if content exceeds terminal height
+        if total_lines > height - 2:  # -2 for footer + margin
+            # Calculate max scroll
+            max_scroll = max(0, total_lines - (height - 2))
+            scroll_offset = min(scroll_offset, max_scroll)
+
+            # Apply scroll: slice the content lines
+            visible_count = height - 1  # -1 for footer
+            visible_lines = lines[scroll_offset:scroll_offset + visible_count]
+
+            # Add scroll indicator at top if scrolled down
+            if scroll_offset > 0:
+                indicator = f" ↑ {scroll_offset} more "
+                if visible_lines:
+                    # Modify first line to include scroll indicator
+                    first_line = visible_lines[0]
+                    visible_lines[0] = f"{first_line}{YELLOW}{indicator}{RESET}"
+
+            # Fill remaining space if needed
+            while len(visible_lines) < height - 1:
+                visible_lines.append("")
+
+            # Footer with scroll info
+            scroll_info = f"[{scroll_offset+1}-{min(scroll_offset+visible_count, total_lines)}/{total_lines}]"
+            footer = f" ↑↓/j,k/g,G: scroll {scroll_info} | q: quit "
+            padding = max(0, (min(width, 80) - len(footer)) // 2)
+            visible_lines.append(f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}")
+
+            return visible_lines[:height]
+
+        # Original behavior when content fits
         while len(lines) < height - 1:
             lines.append("")
 
-        # Footer
-        footer = " Press 'q' to quit | Claude[Cl] Codex[Co] OpenCode[Op] "
+        # Footer (original)
+        footer = " Press 'q' to quit | Claude[Cl] Codex[Co] OpenCode[Op] Gemini[Ge] "
         padding = max(0, (min(width, 80) - len(footer)) // 2)
         lines.append(f"{BLUE}{'=' * padding}{footer}{'=' * max(0, min(width, 80) - padding - len(footer))}{RESET}")
 
@@ -723,6 +856,8 @@ def draw_dashboard_ansi():
                 status = get_codex_status(s, cpu)
             elif s.get('tool') == 'OpenCode':
                 status = get_opencode_status(s, cpu)
+            elif s.get('tool') == 'Gemini':
+                status = get_gemini_status(s, cpu)
             else:
                 status = ("-", "-", 0)
             state[key] = status[1]
@@ -738,13 +873,16 @@ def draw_dashboard_ansi():
         sys.stdout.flush()
         tty.setcbreak(sys.stdin.fileno())
 
+        scroll_offset = 0
         prev_state = None
+        force_redraw = False
 
         while True:
             current_state = get_state()
+            width, height = get_terminal_size()
 
-            if current_state != prev_state:
-                lines = render_lines()
+            if current_state != prev_state or force_redraw:
+                lines = render_lines(scroll_offset)
                 output = []
                 for i, line in enumerate(lines):
                     output.append(move_cursor(height - len(lines) + i + 1))
@@ -753,11 +891,42 @@ def draw_dashboard_ansi():
                 sys.stdout.write(''.join(output))
                 sys.stdout.flush()
                 prev_state = current_state.copy()
+                force_redraw = False
 
             if select.select([sys.stdin], [], [], 1.0)[0]:
                 key = sys.stdin.read(1)
                 if key.lower() == 'q':
                     break
+                elif key == 'j' or key == '\x1b':
+                    if key == '\x1b':
+                        # Handle arrow keys (escape sequences)
+                        if select.select([sys.stdin], [], [], 0.05)[0]:
+                            key2 = sys.stdin.read(1)
+                            if key2 == '[':
+                                if select.select([sys.stdin], [], [], 0.05)[0]:
+                                    key3 = sys.stdin.read(1)
+                                    if key3 == 'B':  # Down arrow
+                                        scroll_offset += 3
+                                        force_redraw = True
+                                    elif key3 == 'A':  # Up arrow
+                                        scroll_offset = max(0, scroll_offset - 3)
+                                        force_redraw = True
+                    else:
+                        # j key = scroll down
+                        scroll_offset += 3
+                        force_redraw = True
+                elif key == 'k':
+                    # k key = scroll up
+                    scroll_offset = max(0, scroll_offset - 3)
+                    force_redraw = True
+                elif key == 'g':
+                    # g key = go to top
+                    scroll_offset = 0
+                    force_redraw = True
+                elif key == 'G':
+                    # G key = go to bottom
+                    scroll_offset = 99999  # will be clamped in render_lines
+                    force_redraw = True
 
     except KeyboardInterrupt:
         pass
@@ -792,6 +961,8 @@ def main():
                     _, status, _ = get_codex_status(s, cpu)
                 elif tool == 'OpenCode':
                     _, status, _ = get_opencode_status(s, cpu)
+                elif tool == 'Gemini':
+                    _, status, _ = get_gemini_status(s, cpu)
                 else:
                     status = "-"
 
