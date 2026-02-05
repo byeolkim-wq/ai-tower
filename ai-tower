@@ -107,13 +107,7 @@ def get_all_ai_sessions():
         session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         # Show as many sessions as running processes
         for i in range(proc_count):
-            if i < len(session_files):
-                sf = session_files[i]
-            elif session_files:
-                # Reuse most recent session file for message display
-                sf = session_files[0]
-            else:
-                sf = None
+            sf = session_files[i] if i < len(session_files) else None
             sessions.append({
                 'tool': 'Claude',
                 'cwd': cwd,
